@@ -26,7 +26,8 @@ public abstract class DBFlavor {
 
   enum DBName {
     DEFAULT,
-    PHOENIX
+    PHOENIX,
+    ORACLE
   }
 
   private final DBName dbName;
@@ -35,9 +36,16 @@ public abstract class DBFlavor {
     this.dbName = dbName;
   }
 
+  public boolean DBFlavorIsOracle() {
+    return this.dbName == DBName.ORACLE;
+  }
+
   public static DBFlavor fromJdbcUrl(String url) {
     if (url.startsWith("jdbc:phoenix")) {
       return new PhoenixDBFlavor();
+    }
+    else if (url.startsWith("jdbc:oracle")) {
+      return new OracleDBFlavor();
     }
     return new DefaultDBFlavor();
   }

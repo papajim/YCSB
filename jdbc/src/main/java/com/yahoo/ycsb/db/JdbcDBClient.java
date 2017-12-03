@@ -27,6 +27,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import com.yahoo.ycsb.db.flavors.DBFlavor;
+import org.json.JSONObject;
 
 /**
  * A class that wraps a JDBC compliant database to allow it to be interfaced
@@ -326,10 +327,20 @@ public class JdbcDBClient extends DB {
         return Status.NOT_FOUND;
       }
       if (result != null && fields != null) {
-        for (String field : fields) {
-          String value = resultSet.getString(field);
-          result.put(field, new StringByteIterator(value));
+        if (dbFlavor.DBFlavorIsOracle())
+        {
+          JSONObject ycsb_doc = new JSONObject(resultSet.getString("YCSB_DOC"));
+          for (String field : fields) {
+            String value = ycsb_doc.getString(field);
+            result.put(field, new StringByteIterator(value));
+          }
         }
+        else {
+          for (String field : fields) {
+            String value = resultSet.getString(field);
+            result.put(field, new StringByteIterator(value));
+          }
+       }
       }
       resultSet.close();
       return Status.OK;
@@ -343,6 +354,8 @@ public class JdbcDBClient extends DB {
   public Status scan(String tableName, String startKey, int recordcount, Set<String> fields,
                      Vector<HashMap<String, ByteIterator>> result) {
     try {
+      //String fieldKeys = String.join(",", fields);
+      //StatementType type = new StatementType(StatementType.Type.SCAN, tableName, fields.size(), fieldKeys, getShardIndexByKey(startKey));
       StatementType type = new StatementType(StatementType.Type.SCAN, tableName, 1, "", getShardIndexByKey(startKey));
       PreparedStatement scanStatement = cachedStatements.get(type);
       if (scanStatement == null) {
@@ -352,13 +365,27 @@ public class JdbcDBClient extends DB {
       scanStatement.setInt(2, recordcount);
       ResultSet resultSet = scanStatement.executeQuery();
       for (int i = 0; i < recordcount && resultSet.next(); i++) {
-        if (result != null && fields != null) {
-          HashMap<String, ByteIterator> values = new HashMap<String, ByteIterator>();
-          for (String field : fields) {
-            String value = resultSet.getString(field);
-            values.put(field, new StringByteIterator(value));
+        if (dbFlavor.DBFlavorIsOracle())
+        {
+          if (result != null && fields != null) {
+            HashMap<String, ByteIterator> values = new HashMap<String, ByteIterator>();
+            JSONObject ycsb_doc = new JSONObject(resultSet.getString("YCSB_DOC"));
+            for (String field : fields) {
+              String value = ycsb_doc.getString(field);
+              values.put(field, new StringByteIterator(value));
+            }
+            result.add(values);
           }
-          result.add(values);
+        }
+        else {
+          if (result != null && fields != null) {
+            HashMap<String, ByteIterator> values = new HashMap<String, ByteIterator>();
+            for (String field : fields) {
+              String value = resultSet.getString(field);
+              values.put(field, new StringByteIterator(value));
+            }
+            result.add(values);
+          }
         }
       }
       resultSet.close();
@@ -372,6 +399,25 @@ public class JdbcDBClient extends DB {
   @Override
   public Status update(String tableName, String key, Map<String, ByteIterator> values) {
     try {
+      JSONObject ycsb_doc_old = new JSONObject();
+      if (dbFlavor.DBFlavorIsOracle()) {
+        try {
+          StatementType type = new StatementType(StatementType.Type.READ, tableName, 1, "", getShardIndexByKey(key));
+          PreparedStatement readStatement = cachedStatements.get(type);
+          if (readStatement == null) {
+            readStatement = createAndCacheReadStatement(type, key);
+          }
+          readStatement.setString(1, key);
+          ResultSet resultSet = readStatement.executeQuery();
+          if (resultSet.next()) {
+            ycsb_doc_old = new JSONObject(resultSet.getString("YCSB_DOC"));
+          }
+        }catch(SQLException e){
+          System.err.println("Error in processing read of table " + tableName + ": " + e);
+          return Status.ERROR;
+        }
+      }
+
       int numFields = values.size();
       OrderedFieldInfo fieldInfo = getFieldInfo(values);
       StatementType type = new StatementType(StatementType.Type.UPDATE, tableName,
@@ -380,11 +426,28 @@ public class JdbcDBClient extends DB {
       if (updateStatement == null) {
         updateStatement = createAndCacheUpdateStatement(type, key);
       }
-      int index = 1;
-      for (String value: fieldInfo.getFieldValues()) {
-        updateStatement.setString(index++, value);
+
+      if (dbFlavor.DBFlavorIsOracle())
+      {
+        String[] fieldKeys = fieldInfo.getFieldKeys().split(",");
+        List<String> fieldValues = fieldInfo.getFieldValues();
+
+        ycsb_doc_old.put(PRIMARY_KEY, key);
+        for (int i = 0; i < numFields; i++) {
+          ycsb_doc_old.put(fieldKeys[i], fieldValues.get(i));
+        }
+
+        updateStatement.setString(1, ycsb_doc_old.toString());
+        updateStatement.setString(2, key);
       }
-      updateStatement.setString(index, key);
+      else {
+        int index = 1;
+        for (String value : fieldInfo.getFieldValues()) {
+          updateStatement.setString(index++, value);
+        }
+        updateStatement.setString(index, key);
+      }
+
       int result = updateStatement.executeUpdate();
       if (result == 1) {
         return Status.OK;
@@ -407,11 +470,29 @@ public class JdbcDBClient extends DB {
       if (insertStatement == null) {
         insertStatement = createAndCacheInsertStatement(type, key);
       }
-      insertStatement.setString(1, key);
-      int index = 2;
-      for (String value: fieldInfo.getFieldValues()) {
-        insertStatement.setString(index++, value);
+
+      if (dbFlavor.DBFlavorIsOracle())
+      {
+        String[] fieldKeys = fieldInfo.getFieldKeys().split(",");
+        List<String> fieldValues = fieldInfo.getFieldValues();
+
+        JSONObject json_doc = new JSONObject();
+        json_doc.put(PRIMARY_KEY, key);
+        for (int i = 0; i < numFields; i++) {
+          json_doc.put(fieldKeys[i], fieldValues.get(i));
+        }
+
+        insertStatement.setString(1, key);
+        insertStatement.setString(2, json_doc.toString());
       }
+      else {
+        insertStatement.setString(1, key);
+        int index = 2;
+        for (String value : fieldInfo.getFieldValues()) {
+          insertStatement.setString(index++, value);
+        }
+      }
+
       // Using the batch insert API
       if (batchUpdates) {
         insertStatement.addBatch();
